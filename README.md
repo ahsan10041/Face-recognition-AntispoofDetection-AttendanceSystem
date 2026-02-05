@@ -25,6 +25,10 @@ python app.py
 http://localhost:5000
 ```
 
+## 🖼️ Demo
+
+![Live Demo](demo/demo.png)
+
 ## 📋 Features
 
 ✅ Real-time face detection (MediaPipe)
