@@ -1,4 +1,4 @@
-# Face Recognition + Classical Anti-Spoofing System
+# Face Recognition +  Anti-Spoofing/liveness-detection Attendance System
 
 ## 🛡️ Anti-Spoofing Technology
 
