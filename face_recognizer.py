@@ -5,92 +5,83 @@ import os
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
 
+
 class FaceRecognizer:
-    def __init__(self, db_path='data/users.pkl', threshold=0.6):
+    """
+    1:1 face verification using DeepFace with the FaceNet backbone.
+    Embeddings (128-d) are stored per user and compared via cosine similarity.
+    threshold=0.6 was chosen empirically: below this, matches are unreliable.
+    """
+
+    def __init__(self, db_path="data/users.pkl", threshold=0.6):
         self.db_path = db_path
         self.threshold = threshold
-        self.database = self.load_database()
-        
-    def load_database(self):
-        """Load user database"""
+        self.database = self._load()
+
+    def _load(self):
         if os.path.exists(self.db_path):
-            with open(self.db_path, 'rb') as f:
+            with open(self.db_path, "rb") as f:
                 return pickle.load(f)
         return {}
-    
-    def save_database(self):
-        """Save user database"""
+
+    def _save(self):
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        with open(self.db_path, 'wb') as f:
+        with open(self.db_path, "wb") as f:
             pickle.dump(self.database, f)
-    
+
     def extract_embedding(self, face_image):
-        """Extract face embedding"""
+        """Run FaceNet and return a 128-d embedding, or None on failure."""
         try:
-            embedding = DeepFace.represent(
+            result = DeepFace.represent(
                 face_image,
-                model_name='Facenet',
-                enforce_detection=False
+                model_name="Facenet",
+                enforce_detection=False,
             )
-            return np.array(embedding[0]['embedding'])
+            return np.array(result[0]["embedding"])
         except Exception as e:
-            print(f"Error extracting embedding: {e}")
+            print(f"Embedding error: {e}")
             return None
-    
+
     def register_user(self, name, face_image):
-        """Register new user"""
         if name in self.database:
             return False, "User already exists"
-        
-        embedding = self.extract_embedding(face_image)
-        
-        if embedding is None:
+        emb = self.extract_embedding(face_image)
+        if emb is None:
             return False, "Failed to extract face features"
-        
         self.database[name] = {
-            'embedding': embedding,
-            'registered_at': datetime.now().isoformat()
+            "embedding": emb,
+            "registered_at": datetime.now().isoformat(),
         }
-        
-        self.save_database()
+        self._save()
         return True, "User registered successfully"
-    
+
     def recognize(self, face_image):
         """
-        Recognize face
-        Returns: (name, confidence) or (None, 0)
+        Compare face against all registered users.
+        Returns (name, similarity) of the best match, or (None, similarity) if
+        no match exceeds the threshold.
         """
         if not self.database:
-            return None, 0
-        
-        embedding = self.extract_embedding(face_image)
-        
-        if embedding is None:
-            return None, 0
-        
-        best_match = None
-        best_similarity = 0
-        
+            return None, 0.0
+
+        emb = self.extract_embedding(face_image)
+        if emb is None:
+            return None, 0.0
+
+        best_name = None
+        best_sim = 0.0
         for name, data in self.database.items():
-            stored_emb = data['embedding']
-            similarity = cosine_similarity(
-                embedding.reshape(1, -1),
-                stored_emb.reshape(1, -1)
+            sim = cosine_similarity(
+                emb.reshape(1, -1),
+                data["embedding"].reshape(1, -1),
             )[0][0]
-            
-            if similarity > best_similarity:
-                best_similarity = similarity
-                best_match = name
-        
-        if best_similarity >= self.threshold:
-            return best_match, best_similarity
-        
-        return None, best_similarity
-    
+            if sim > best_sim:
+                best_sim = sim
+                best_name = name
+
+        if best_sim >= self.threshold:
+            return best_name, best_sim
+        return None, best_sim
+
     def get_all_users(self):
-        """Get all registered users"""
         return list(self.database.keys())
-    
-    def get_user_count(self):
-        """Get total user count"""
-        return len(self.database)

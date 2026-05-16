@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# Runtime data (user registrations and attendance logs)
+data/
+
+# Auto-downloaded model files
+*.tflite
+*.pth
+*.onnx
+*.onnx.data
+
+# IDE / tool config
+.vscode/
+.idea/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / dist
+dist/
+build/
+*.egg-info/

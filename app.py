@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 from face_detector import FaceDetector
 from face_recognizer import FaceRecognizer
-from anti_spoof_classical import AntiSpoofClassical
+from anti_spoof import AntiSpoof
 import json
 from datetime import datetime
 import os
@@ -13,7 +13,7 @@ app = Flask(__name__)
 # Initialize components
 face_detector = FaceDetector()
 face_recognizer = FaceRecognizer()
-anti_spoof = AntiSpoofClassical()
+anti_spoof = AntiSpoof()
 
 # Global variables
 camera = None
@@ -22,12 +22,17 @@ attendance_log = []
 anti_spoof_enabled = True
 
 def get_camera():
-    """Get camera instance"""
+    """Get camera instance, preferring external webcam (index 1) over built-in (index 0)"""
     global camera
     if camera is None:
-        camera = cv2.VideoCapture(0)
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        for index in [1, 0]:
+            cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                camera = cap
+                camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                print(f"Using camera index {index}")
+                break
     return camera
 
 def generate_frames():
@@ -46,13 +51,8 @@ def generate_frames():
             x, y, w, h = bbox
             
             if anti_spoof_enabled:
-                face_img = face_detector.extract_face(frame, bbox, target_size=(160, 160))
-                
-                if face_img is not None:
-                    spoof_result = anti_spoof.predict(face_img, full_frame=frame)
-                    frame = anti_spoof.annotate_frame(frame, bbox, spoof_result)
-                else:
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (128, 128, 128), 2)
+                spoof_result = anti_spoof.predict(frame, bbox)
+                frame = anti_spoof.annotate_frame(frame, bbox, spoof_result)
             else:
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
         
@@ -95,21 +95,18 @@ def capture_frame():
     
     spoof_result = None
     if anti_spoof_enabled:
-        face_160 = face_detector.extract_face(frame, faces[0], target_size=(160, 160))
-        if face_160 is not None:
-            spoof_result = anti_spoof.predict(face_160, full_frame=frame)
-            
-            if not spoof_result['is_real']:
-                return jsonify({
-                    'success': False,
-                    'message': f'Spoof detected! ({spoof_result["confidence"]:.0%})',
-                    'spoof_detected': True,
-                    'spoof_result': {
-                        'label': spoof_result['label'],
-                        'confidence': float(spoof_result['confidence']),
-                        'scores': {k: float(v) for k, v in spoof_result['scores'].items()}
-                    }
-                })
+        spoof_result = anti_spoof.predict(frame, faces[0])
+        if not spoof_result['is_real']:
+            return jsonify({
+                'success': False,
+                'message': f'Spoof detected! ({spoof_result["confidence"]:.0%})',
+                'spoof_detected': True,
+                'spoof_result': {
+                    'label': spoof_result['label'],
+                    'confidence': float(spoof_result['confidence']),
+                    'scores': {k: float(v) for k, v in spoof_result['scores'].items()}
+                }
+            })
     
     ret, buffer = cv2.imencode('.jpg', face_img)
     img_str = buffer.tobytes()
@@ -170,16 +167,13 @@ def recognize():
     
     spoof_result = None
     if anti_spoof_enabled:
-        face_160 = face_detector.extract_face(frame, faces[0], target_size=(160, 160))
-        if face_160 is not None:
-            spoof_result = anti_spoof.predict(face_160, full_frame=frame)
-            
-            if not spoof_result['is_real']:
-                return jsonify({
-                    'success': False,
-                    'message': f'Spoof attack detected! ({spoof_result["confidence"]:.0%})',
-                    'spoof_detected': True
-                })
+        spoof_result = anti_spoof.predict(frame, faces[0])
+        if not spoof_result['is_real']:
+            return jsonify({
+                'success': False,
+                'message': f'Spoof attack detected! ({spoof_result["confidence"]:.0%})',
+                'spoof_detected': True
+            })
     
     name, confidence = face_recognizer.recognize(face_img)
     
@@ -251,7 +245,7 @@ def toggle_antispoof():
 def get_antispoof_status():
     return jsonify({
         'enabled': anti_spoof_enabled,
-        'method': 'Classical CV (LBP+HOG+DoG+Flow+Blink)'
+        'method': 'Classical CV (LBP + optical flow + colour + FFT)'
     })
 
 def save_attendance_log():
@@ -268,19 +262,22 @@ def load_attendance_log():
 if __name__ == '__main__':
     load_attendance_log()
     
-    print("="*60)
-    print("Face Recognition + Anti-Spoofing System")
-    print("="*60)
-    print("Anti-Spoof Method: Classical Computer Vision")
-    print("Techniques:")
-    print("  ✓ LBP (Texture Analysis)")
-    print("  ✓ HOG (Edge Detection)")
-    print("  ✓ DoG (Frequency Analysis)")
-    print("  ✓ Optical Flow (Motion Detection)")
-    print("  ✓ Blink Detection (Liveness)")
-    print("  ✓ Color/Reflectance Analysis")
-    print("  ✓ Micro-texture Analysis")
-    print("="*60)
+    print("=" * 60)
+    print("  Face Recognition + Anti-Spoofing Attendance System")
+    print("=" * 60)
+    print("  Face detection  : MediaPipe BlazeFace")
+    print("  Face recognition: DeepFace / FaceNet (cosine sim)")
+    print("  Anti-spoofing   : Classical CV (self-implemented)")
+    print("    - LBP skin texture entropy")
+    print("    - Optical flow liveness")
+    print("    - Temporal blood-flow color variation")
+    print("    - Screen emission / brightness uniformity")
+    print("    - Screen colour saturation + blue-bias")
+    print("    - Moire / pixel-grid FFT analysis")
+    print("    - Edge sharpness anomaly")
+    print("=" * 60)
+    print("  Open http://localhost:5000 in your browser")
+    print("=" * 60)
     print()
     
     app.run(debug=False, host='0.0.0.0', port=5000)
