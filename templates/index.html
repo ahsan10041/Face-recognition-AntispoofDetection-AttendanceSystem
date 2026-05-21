@@ -74,6 +74,21 @@
 
                 <div class="card">
                     <div class="card-header">
+                        <h2>Anti-Spoof Debug</h2>
+                        <button class="btn-icon" id="debugToggleBtn" onclick="toggleDebugPoll()" title="Pause/resume">
+                            <svg id="debugToggleIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <rect x="6" y="4" width="4" height="16"></rect>
+                                <rect x="14" y="4" width="4" height="16"></rect>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div id="debugPanel"><p class="text-muted">Scan a face to see anti-spoof result</p></div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
                         <h2>Registered Users</h2>
                         <button class="btn-icon" onclick="loadUsers()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">

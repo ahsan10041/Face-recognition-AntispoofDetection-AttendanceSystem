@@ -1,6 +1,6 @@
 # Face Recognition + Anti-Spoofing Attendance System
 
-A real-time biometric attendance system built with Python and Flask. It combines face detection, face recognition, and a fully self-implemented classical-CV anti-spoofing module to reject photo and screen-replay attacks.
+A real-time biometric attendance system built with Python and Flask. It combines face detection, face recognition, and passive presentation attack detection (PAD) to reject photo and screen-replay attacks without requiring any user cooperation.
 
 ## Demo
 
@@ -10,31 +10,39 @@ A real-time biometric attendance system built with Python and Flask. It combines
 
 - Real-time face detection via MediaPipe BlazeFace
 - Face recognition using DeepFace / FaceNet embeddings (cosine similarity)
-- Anti-spoofing with 7 hand-crafted classical CV detectors — no pre-trained spoof model required
+- Passive anti-spoofing via DeepFace FasNet (MiniFASNet V2 + V1SE ensemble) — single-frame, no user cooperation required
+- Live video feed annotated with green (Real) / red (Spoof) bounding boxes
 - Web interface for user registration, attendance marking, and log viewing
-- Attendance log persisted to JSON
+- Attendance log persisted to JSON, including anti-spoof decision metadata per entry
 
 ## Anti-Spoofing Approach
 
-The anti-spoofing module (`anti_spoof.py`) is entirely self-implemented. It combines two independent score tracks:
+The anti-spoofing module (`anti_spoof.py`) uses DeepFace's bundled FasNet implementation, accessed via `DeepFace.extract_faces(anti_spoofing=True)`.
 
-**Screen / replay attack track**
-| Detector | Physical basis |
-|---|---|
-| Rolling-shutter banding | Screens flicker at a fixed refresh rate, causing horizontal intensity bands |
-| Emission + uniformity | Screens emit light; real faces only reflect it, producing higher brightness variance |
-| Screen colour saturation | LCD backlights produce skin tones with higher HSV saturation and a blue bias compared to real skin |
-| Optical-flow liveness | Real faces show non-rigid micro-motion; flat objects translate rigidly |
-| Moiré / FFT | Screen pixel grids create periodic frequency peaks detectable via FFT |
+FasNet is an ensemble of two MiniFASNet variants ([Liu et al., 2021](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing)):
 
-**Print attack track**
-| Detector | Physical basis |
-|---|---|
-| LBP texture entropy | Real skin at close range has rich micro-texture (entropy > 1.8); prints and screens compress it |
-| Temporal colour variation | Blood flow causes subtle R/G channel variation across frames; printed faces are static |
-| Edge sharpness anomaly | JPEG and print compression leaves characteristic edge artefacts |
+| Model | Crop scale | What it captures |
+|---|---|---|
+| MiniFASNetV2 | 2.7× | Screen pixel grid, emission patterns, brightness uniformity |
+| MiniFASNetV1SE | 4.0× | Flat-object geometry, large-area lighting distribution |
 
-Scores are fused as `spoof_score = max(screen_score, print_score)` and compared to a threshold of 0.35. A face is classified as a bona fide presentation if `spoof_score < 0.35`.
+Each model outputs a two-class softmax; the ensemble produces a single `antispoof_score ∈ [0, 1]`:
+
+```
+antispoof_score > 0.5  →  Real
+antispoof_score ≤ 0.5  →  Spoof
+```
+
+Empirically observed score separation on a Logitech C920 webcam:
+
+| Presentation type | Typical score | Decision |
+|---|---|---|
+| Live face | 0.95 – 0.99 | Real ✓ |
+| Phone screen / printed photo | 0.28 – 0.35 | Spoof ✓ |
+
+The ~0.60 margin around the 0.5 threshold gives robust discrimination under typical office lighting with no overlap between genuine and attack score distributions.
+
+A background worker thread runs FasNet every 400 ms, decoupled from the MJPEG stream so the video feed is never blocked by inference. Anti-spoofing is skipped when multiple faces are in frame (a yellow box is shown instead) to prevent score misattribution between subjects.
 
 ## Installation
 
@@ -48,9 +56,12 @@ venv\Scripts\activate          # Windows
 
 # Install dependencies
 pip install -r requirements.txt
+
+# PyTorch — CPU-only build is sufficient for FasNet and avoids a large CUDA download
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-The MediaPipe BlazeFace model (`blaze_face_short_range.tflite`) is downloaded automatically on first run.
+The MediaPipe BlazeFace model (`blaze_face_short_range.tflite`) and FasNet weights (~10 MB each) are downloaded automatically on first run.
 
 ## Running
 
@@ -60,23 +71,25 @@ python app.py
 
 Open [http://localhost:5000](http://localhost:5000) in your browser.
 
+> **Note:** The first startup takes 30–40 s while PyTorch loads the FasNet model weights. Subsequent runs are faster once the OS has cached the files. A warm-up pass runs automatically before the server begins accepting requests.
+
 ## Usage
 
 1. **Register** — enter a name and click "Register User". Stand in front of the camera alone.
-2. **Mark Attendance** — click "Scan Face". The system will detect, anti-spoof-check, and recognise you.
-3. **Attendance Log** — visible in the right panel; also saved to `data/attendance_log.json`.
+2. **Mark Attendance** — click "Scan Face". The system detects, anti-spoof-checks, and recognises you.
+3. **Attendance Log** — visible in the bottom panel; also saved to `data/attendance_log.json`. Each entry includes the anti-spoof label, confidence, and raw `antispoof_score`.
 
-The anti-spoofing overlay shows a green bounding box (Real) or red (Spoof) on the live feed at all times.
+The live feed shows a green bounding box (Real) or red (Spoof) at all times. Multi-face frames show a yellow box and skip PAD.
 
 ## Project Structure
 
 ```
 ├── app.py                  Flask application and REST endpoints
-├── anti_spoof.py           Self-implemented classical CV anti-spoofing
-├── anti_spoof_classical.py Earlier version kept for reference
+├── anti_spoof.py           DeepFace FasNet wrapper (current anti-spoofing)
+├── anti_spoof_classical.py Self-implemented classical CV pipeline (Phase 2, retained for reference)
 ├── face_detector.py        MediaPipe BlazeFace wrapper
 ├── face_recognizer.py      DeepFace / FaceNet wrapper
-├── setup_antispoof.py      Utility to download MiniFASNet weights (not used by default)
+├── liveness_challenge.py   Challenge-response liveness module (built, not integrated)
 ├── requirements.txt
 ├── templates/
 │   └── index.html
@@ -90,40 +103,44 @@ The anti-spoofing overlay shows a green bounding box (Real) or red (Spoof) on th
 
 ## Configuration
 
-The anti-spoofing threshold can be adjusted in `anti_spoof.py`:
-
-```python
-# Line ~130 in predict()
-is_real = spoof_score < 0.35   # lower = stricter (fewer false accepts)
-```
-
-The face recognition similarity threshold is set in `face_recognizer.py`:
+The face recognition similarity threshold can be adjusted in `face_recognizer.py`:
 
 ```python
 def __init__(self, db_path="data/users.pkl", threshold=0.6):
 ```
 
+The EER occurs at τ ≈ 0.52. The default τ = 0.6 biases towards lower FAR (fewer impostors accepted) at the cost of slightly higher FRR — appropriate for an attendance context where falsely recording an absent person as present is the more serious error.
+
+The anti-spoofing threshold (0.5) is internal to DeepFace's FasNet implementation and is not user-configurable. The empirically observed score separation (~0.60 margin) means adjusting it is not necessary in practice.
+
 ## Troubleshooting
 
 **Real face flagged as spoof**
-- Improve lighting — the emission and colour detectors are sensitive to low-light conditions
-- Raise the threshold slightly (e.g. `0.38`)
+- Ensure even, adequate lighting — extreme shadows or direct backlighting confuse FasNet
+- Make sure only one face is in frame (multi-face frames show a yellow box and skip PAD entirely)
+- Move slightly closer to the camera so the face fills more of the frame
 
-**Photo / screen accepted as real**
-- Lower the threshold (e.g. `0.30`)
-- Make sure anti-spoofing is enabled in the UI (toggle switch)
+**Photo / screen not being rejected**
+- Ensure anti-spoofing is enabled (it is on by default)
+- FasNet's 0.5 threshold is not adjustable; if a high-quality attack passes, the limitation is the model's training coverage rather than the threshold setting
 
 **Camera not detected**
-- The app tries index 1 (external webcam) before index 0 (built-in). Check that your webcam is connected before starting.
+- The app tries index 1 (external webcam) before index 0 (built-in). Ensure your webcam is connected before starting.
+
+**Slow first startup (30–40 s)**
+- PyTorch is loading the FasNet model weights. Subsequent startups are faster once the OS has cached the files.
 
 ## Dependencies
 
-| Package | Purpose | Source |
-|---|---|---|
-| flask | Web server | External |
-| opencv-python | Image processing, optical flow | External |
-| mediapipe | Face detection (BlazeFace) | External (Google) |
-| deepface | Face recognition (FaceNet) | External |
-| scikit-image | LBP feature extraction | External |
-| numpy | Numerical operations, FFT | External |
-| scikit-learn | Cosine similarity | External |
+| Package | Purpose |
+|---|---|
+| flask | Web server, REST API, MJPEG routing |
+| opencv-python | Video capture, image processing |
+| mediapipe | Face detection (BlazeFace) |
+| deepface | Face recognition (FaceNet) + anti-spoofing (FasNet) |
+| torch | PyTorch backend for FasNet inference |
+| tf-keras | TensorFlow/Keras backend for DeepFace FaceNet |
+| numpy | Array operations |
+| scikit-learn | Cosine similarity |
+| scikit-image | LBP feature extraction (classical CV reference module) |
+| Pillow | Image I/O |

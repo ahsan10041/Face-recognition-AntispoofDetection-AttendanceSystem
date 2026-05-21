@@ -1,6 +1,8 @@
 from flask import Flask, render_template, Response, request, jsonify
 import cv2
 import numpy as np
+import threading
+import time
 from face_detector import FaceDetector
 from face_recognizer import FaceRecognizer
 from anti_spoof import AntiSpoof
@@ -10,19 +12,49 @@ import os
 
 app = Flask(__name__)
 
-# Initialize components
-face_detector = FaceDetector()
+face_detector   = FaceDetector()
 face_recognizer = FaceRecognizer()
-anti_spoof = AntiSpoof()
+anti_spoof      = AntiSpoof()
 
-# Global variables
-camera = None
-current_mode = 'attendance'
-attendance_log = []
+camera             = None
+current_mode       = 'attendance'
+attendance_log     = []
 anti_spoof_enabled = True
+last_debug_scores  = {}
+
+# Shared state for background anti-spoof worker
+_latest_frame  = None
+_latest_faces  = []
+_frame_lock    = threading.Lock()
+_spoof_cache   = None
+_spoof_lock    = threading.Lock()
+
+
+def _spoof_worker():
+    """
+    Background thread: runs FasNet on single-face frames only.
+    Multi-face frames are skipped — we can't reliably attribute a score
+    to each face when two people are in frame simultaneously.
+    """
+    global _spoof_cache
+    while True:
+        with _frame_lock:
+            frame = _latest_frame.copy() if _latest_frame is not None else None
+            faces = list(_latest_faces)
+
+        # Only predict when exactly one face is visible
+        if frame is not None and len(faces) == 1 and anti_spoof_enabled:
+            result = anti_spoof.predict(frame, faces[0])
+            with _spoof_lock:
+                _spoof_cache = result
+
+        time.sleep(0.4)
+
+
+# Thread is started in __main__ after model warm-up (see bottom of file)
+
 
 def get_camera():
-    """Get camera instance, preferring external webcam (index 1) over built-in (index 0)"""
     global camera
     if camera is None:
         for index in [1, 0]:
@@ -35,32 +67,38 @@ def get_camera():
                 break
     return camera
 
+
 def generate_frames():
-    """Generate video frames with face detection and anti-spoofing"""
+    global _latest_frame, _latest_faces
     while True:
         cam = get_camera()
         success, frame = cam.read()
-        
         if not success:
             break
-        
+
         frame = cv2.flip(frame, 1)
         faces = face_detector.detect(frame)
-        
+
+        # Feed background worker
+        with _frame_lock:
+            _latest_frame = frame.copy()
+            _latest_faces = list(faces)
+
+        with _spoof_lock:
+            cached = _spoof_cache
+
         for bbox in faces:
             x, y, w, h = bbox
-            
-            if anti_spoof_enabled:
-                spoof_result = anti_spoof.predict(frame, bbox)
-                frame = anti_spoof.annotate_frame(frame, bbox, spoof_result)
+            if len(faces) == 1 and cached and anti_spoof_enabled:
+                frame = anti_spoof.annotate_frame(frame, bbox, cached)
             else:
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        
+                # Multiple faces or no result yet — neutral box
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 200, 255), 2)
+
         ret, buffer = cv2.imencode('.jpg', frame)
-        frame = buffer.tobytes()
-        
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+
 
 @app.route('/')
 def index():
@@ -71,140 +109,120 @@ def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
 @app.route('/capture_frame', methods=['POST'])
 def capture_frame():
+    global last_debug_scores
     cam = get_camera()
     success, frame = cam.read()
-    
     if not success:
         return jsonify({'success': False, 'message': 'Failed to capture frame'})
-    
+
     frame = cv2.flip(frame, 1)
     faces = face_detector.detect(frame)
-    
+
     if len(faces) == 0:
         return jsonify({'success': False, 'message': 'No face detected'})
-    
     if len(faces) > 1:
         return jsonify({'success': False, 'message': 'Multiple faces detected'})
-    
+
     face_img = face_detector.extract_face(frame, faces[0])
-    
     if face_img is None:
         return jsonify({'success': False, 'message': 'Failed to extract face'})
-    
-    spoof_result = None
+
     if anti_spoof_enabled:
-        spoof_result = anti_spoof.predict(frame, faces[0])
-        if not spoof_result['is_real']:
+        spoof = anti_spoof.predict(frame, faces[0])
+        last_debug_scores = spoof
+        if not spoof['is_real']:
             return jsonify({
                 'success': False,
-                'message': f'Spoof detected! ({spoof_result["confidence"]:.0%})',
+                'message': f"Spoof detected ({spoof['confidence']:.0%})",
                 'spoof_detected': True,
-                'spoof_result': {
-                    'label': spoof_result['label'],
-                    'confidence': float(spoof_result['confidence']),
-                    'scores': {k: float(v) for k, v in spoof_result['scores'].items()}
-                }
             })
-    
+
     ret, buffer = cv2.imencode('.jpg', face_img)
-    img_str = buffer.tobytes()
-    
-    response_data = {
-        'success': True,
-        'face_data': img_str.hex(),
-        'bbox': faces[0]
-    }
-    
-    if spoof_result:
-        response_data['spoof_result'] = {
-            'label': spoof_result['label'],
-            'confidence': float(spoof_result['confidence']),
-            'scores': {k: float(v) for k, v in spoof_result['scores'].items()}
-        }
-    
-    return jsonify(response_data)
+    return jsonify({'success': True, 'face_data': buffer.tobytes().hex(),
+                    'bbox': faces[0]})
+
 
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.json
-    name = data.get('name', '').strip()
+    data      = request.json
+    name      = data.get('name', '').strip()
     face_data = data.get('face_data')
-    
+
     if not name:
         return jsonify({'success': False, 'message': 'Name is required'})
-    
     if not face_data:
         return jsonify({'success': False, 'message': 'Face data is required'})
-    
+
     face_bytes = bytes.fromhex(face_data)
     face_array = np.frombuffer(face_bytes, dtype=np.uint8)
-    face_img = cv2.imdecode(face_array, cv2.IMREAD_COLOR)
-    
+    face_img   = cv2.imdecode(face_array, cv2.IMREAD_COLOR)
     success, message = face_recognizer.register_user(name, face_img)
-    
     return jsonify({'success': success, 'message': message})
+
 
 @app.route('/recognize', methods=['POST'])
 def recognize():
+    global last_debug_scores
     cam = get_camera()
     success, frame = cam.read()
-    
     if not success:
         return jsonify({'success': False, 'message': 'Failed to capture frame'})
-    
+
     frame = cv2.flip(frame, 1)
     faces = face_detector.detect(frame)
-    
+
     if len(faces) == 0:
         return jsonify({'success': False, 'message': 'No face detected'})
-    
+    if len(faces) > 1:
+        return jsonify({'success': False, 'message': 'Multiple faces detected'})
+
     face_img = face_detector.extract_face(frame, faces[0])
-    
     if face_img is None:
         return jsonify({'success': False, 'message': 'Failed to extract face'})
-    
-    spoof_result = None
+
     if anti_spoof_enabled:
-        spoof_result = anti_spoof.predict(frame, faces[0])
-        if not spoof_result['is_real']:
+        # Fresh inference — model is warm so this takes ~200-400 ms, not 40 s
+        spoof = anti_spoof.predict(frame, faces[0])
+        last_debug_scores = spoof
+        if not spoof['is_real']:
             return jsonify({
-                'success': False,
-                'message': f'Spoof attack detected! ({spoof_result["confidence"]:.0%})',
-                'spoof_detected': True
+                'success':         False,
+                'message':         f"Spoof detected ({spoof['confidence']:.0%})",
+                'spoof_detected':  True,
+                'antispoof_score': spoof['scores'].get('antispoof_score', 0),
             })
-    
+
     name, confidence = face_recognizer.recognize(face_img)
-    
     if name is None:
-        return jsonify({'success': False, 'message': 'Unknown user', 'confidence': float(confidence)})
-    
+        return jsonify({'success': False, 'message': 'Unknown user',
+                        'confidence': float(confidence)})
+
     timestamp = datetime.now()
     log_entry = {
-        'name': name,
-        'timestamp': timestamp.isoformat(),
+        'name':       name,
+        'timestamp':  timestamp.isoformat(),
         'confidence': float(confidence),
-        'mode': current_mode
+        'mode':       current_mode,
     }
-    
-    if spoof_result:
+    if anti_spoof_enabled:
         log_entry['anti_spoof'] = {
-            'label': spoof_result['label'],
-            'confidence': float(spoof_result['confidence'])
+            'label':      spoof['label'],
+            'confidence': spoof['confidence'],
+            'score':      spoof['scores'].get('antispoof_score'),
         }
-    
     attendance_log.append(log_entry)
     save_attendance_log()
-    
-    response_data = {
-        'success': True,
-        'name': name,
+
+    return jsonify({
+        'success':    True,
+        'name':       name,
         'confidence': float(confidence),
-        'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S')
-    }
-    
-    return jsonify(response_data)
+        'timestamp':  timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+    })
+
 
 @app.route('/get_users', methods=['GET'])
 def get_users():
@@ -218,35 +236,32 @@ def get_logs():
 @app.route('/set_mode', methods=['POST'])
 def set_mode():
     global current_mode
-    data = request.json
-    mode = data.get('mode')
-    
+    mode = request.json.get('mode')
     if mode in ['attendance', 'login']:
         current_mode = mode
         return jsonify({'success': True, 'mode': current_mode})
-    
     return jsonify({'success': False, 'message': 'Invalid mode'})
 
 @app.route('/toggle_antispoof', methods=['POST'])
 def toggle_antispoof():
     global anti_spoof_enabled
-    data = request.json
-    enabled = data.get('enabled')
-    
+    enabled = request.json.get('enabled')
     if enabled is not None:
         anti_spoof_enabled = bool(enabled)
-        if anti_spoof_enabled:
-            anti_spoof.reset_temporal_state()
         return jsonify({'success': True, 'enabled': anti_spoof_enabled})
-    
     return jsonify({'success': False, 'message': 'Invalid parameter'})
 
 @app.route('/get_antispoof_status', methods=['GET'])
 def get_antispoof_status():
     return jsonify({
         'enabled': anti_spoof_enabled,
-        'method': 'Classical CV (LBP + optical flow + colour + FFT)'
+        'method':  'DeepFace FasNet (MiniFASNet V2 + V1SE ensemble)',
     })
+
+@app.route('/debug_scores', methods=['GET'])
+def debug_scores():
+    return jsonify(last_debug_scores)
+
 
 def save_attendance_log():
     os.makedirs('data', exist_ok=True)
@@ -259,25 +274,29 @@ def load_attendance_log():
         with open('data/attendance_log.json', 'r') as f:
             attendance_log = json.load(f)
 
+
 if __name__ == '__main__':
     load_attendance_log()
-    
+
     print("=" * 60)
     print("  Face Recognition + Anti-Spoofing Attendance System")
     print("=" * 60)
-    print("  Face detection  : MediaPipe BlazeFace")
+    print("  Preloading anti-spoof model (first run downloads ~20 MB)...")
+    _dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+    anti_spoof.predict(_dummy, (100, 100, 200, 200))
+    print("  Anti-spoof model ready.")
+    print("=" * 60)
+    print("  Face detection  : MediaPipe BlazeFace (Tasks API)")
     print("  Face recognition: DeepFace / FaceNet (cosine sim)")
-    print("  Anti-spoofing   : Classical CV (self-implemented)")
-    print("    - LBP skin texture entropy")
-    print("    - Optical flow liveness")
-    print("    - Temporal blood-flow color variation")
-    print("    - Screen emission / brightness uniformity")
-    print("    - Screen colour saturation + blue-bias")
-    print("    - Moire / pixel-grid FFT analysis")
-    print("    - Edge sharpness anomaly")
+    print("  Anti-spoofing   : DeepFace FasNet — MiniFASNet ensemble")
+    print("    - MiniFASNetV2   (2.7x crop, 80x80)")
+    print("    - MiniFASNetV1SE (4.0x crop, 80x80)")
+    print("    - Passive: no user cooperation required")
     print("=" * 60)
     print("  Open http://localhost:5000 in your browser")
     print("=" * 60)
-    print()
-    
+
+    # Start background anti-spoof thread AFTER model is warm
+    threading.Thread(target=_spoof_worker, daemon=True).start()
+
     app.run(debug=False, host='0.0.0.0', port=5000)
