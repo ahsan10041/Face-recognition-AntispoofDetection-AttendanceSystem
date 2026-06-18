@@ -31,7 +31,9 @@ class FaceDetector:
         self.detector = FaceDetection.create_from_options(options)
 
     def _model_path(self):
-        path = "blaze_face_short_range.tflite"
+        models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+        os.makedirs(models_dir, exist_ok=True)
+        path = os.path.join(models_dir, "blaze_face_short_range.tflite")
         if not os.path.exists(path):
             print("Downloading BlazeFace model...")
             urllib.request.urlretrieve(_MODEL_URL, path)

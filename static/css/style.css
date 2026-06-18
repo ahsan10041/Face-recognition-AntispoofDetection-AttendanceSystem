@@ -309,6 +309,22 @@ body {
 .btn-success:hover {
     background: #059669;
     transform: translateY(-2px);
+}
+
+.btn-quit {
+    background: transparent;
+    color: rgba(255,255,255,0.85);
+    border: 1.5px solid rgba(255,255,255,0.4);
+    width: auto;
+    padding: 8px 18px;
+    font-size: 14px;
+}
+
+.btn-quit:hover {
+    background: rgba(239,68,68,0.85);
+    border-color: transparent;
+    color: var(--white);
+    transform: translateY(-1px);
     box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
 }
 

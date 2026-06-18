@@ -3,9 +3,9 @@ import cv2
 import numpy as np
 import threading
 import time
-from face_detector import FaceDetector
-from face_recognizer import FaceRecognizer
-from anti_spoof import AntiSpoof
+from src.face_detector import FaceDetector
+from src.face_recognizer import FaceRecognizer
+from src.anti_spoof import AntiSpoof
 import json
 from datetime import datetime
 import os
@@ -261,6 +261,11 @@ def get_antispoof_status():
 @app.route('/debug_scores', methods=['GET'])
 def debug_scores():
     return jsonify(last_debug_scores)
+
+@app.route('/shutdown', methods=['POST'])
+def shutdown():
+    threading.Timer(0.5, lambda: os._exit(0)).start()
+    return jsonify({'success': True})
 
 
 def save_attendance_log():

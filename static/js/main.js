@@ -198,3 +198,11 @@ function showToast(message, type = 'success') {
     document.getElementById('toast').classList.add('show');
     setTimeout(() => document.getElementById('toast').classList.remove('show'), 3000);
 }
+
+async function quitApp() {
+    if (!confirm('Stop the server and quit?')) return;
+    try {
+        await post('/shutdown');
+    } catch (_) {}
+    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#666;font-size:1.2rem;">Server stopped. You can close this tab.</div>';
+}
