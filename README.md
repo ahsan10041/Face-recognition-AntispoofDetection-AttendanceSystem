@@ -17,7 +17,7 @@ A real-time biometric attendance system built with Python and Flask. It combines
 
 ## Anti-Spoofing Approach
 
-The anti-spoofing module (`anti_spoof.py`) uses DeepFace's bundled FasNet implementation, accessed via `DeepFace.extract_faces(anti_spoofing=True)`.
+The anti-spoofing module (`src/anti_spoof.py`) uses DeepFace's bundled FasNet implementation, accessed via `DeepFace.extract_faces(anti_spoofing=True)`.
 
 FasNet is an ensemble of two MiniFASNet variants ([Liu et al., 2021](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing)):
 
@@ -78,32 +78,36 @@ Open [http://localhost:5000](http://localhost:5000) in your browser.
 1. **Register** — enter a name and click "Register User". Stand in front of the camera alone.
 2. **Mark Attendance** — click "Scan Face". The system detects, anti-spoof-checks, and recognises you.
 3. **Attendance Log** — visible in the bottom panel; also saved to `data/attendance_log.json`. Each entry includes the anti-spoof label, confidence, and raw `antispoof_score`.
+4. **Quit** — click the "Quit" button in the header to gracefully stop the server (useful on Windows where Ctrl+C may not reach the terminal).
 
 The live feed shows a green bounding box (Real) or red (Spoof) at all times. Multi-face frames show a yellow box and skip PAD.
 
 ## Project Structure
 
 ```
-├── app.py                  Flask application and REST endpoints
-├── anti_spoof.py           DeepFace FasNet wrapper (current anti-spoofing)
-├── anti_spoof_classical.py Self-implemented classical CV pipeline (Phase 2, retained for reference)
-├── face_detector.py        MediaPipe BlazeFace wrapper
-├── face_recognizer.py      DeepFace / FaceNet wrapper
-├── liveness_challenge.py   Challenge-response liveness module (built, not integrated)
+├── app.py                      Flask application and REST endpoints
 ├── requirements.txt
+├── src/
+│   ├── __init__.py
+│   ├── anti_spoof.py           DeepFace FasNet wrapper (production anti-spoofing)
+│   ├── anti_spoof_classical.py Self-implemented classical CV pipeline (Phase 2, retained for reference)
+│   ├── face_detector.py        MediaPipe BlazeFace wrapper
+│   └── face_recognizer.py      DeepFace / FaceNet wrapper
+├── models/
+│   └── blaze_face_short_range.tflite   Downloaded automatically on first run
 ├── templates/
 │   └── index.html
 ├── static/
 │   ├── css/style.css
 │   └── js/main.js
-├── data/                   Created at runtime (user DB + attendance log)
+├── data/                       Created at runtime (user DB + attendance log)
 └── demo/
     └── demo.png
 ```
 
 ## Configuration
 
-The face recognition similarity threshold can be adjusted in `face_recognizer.py`:
+The face recognition similarity threshold can be adjusted in `src/face_recognizer.py`:
 
 ```python
 def __init__(self, db_path="data/users.pkl", threshold=0.6):
